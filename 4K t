@@ -1,0 +1,806 @@
+--[[
+    4K ทู • UI  (ฟังก์ชันเดียว วางแล้วรันได้เลย)
+    • แผงบน  = โลโก้ + FPS + PING (เล็กลงแล้ว)   RightControl = ซ่อน/แสดง
+    • แผงล่าง = ESP / AIM / FOV / ชิป NAME-DIST-HP  RightShift = ซ่อน/แสดง
+    • AIM    = กดเมาส์ขวาค้างเพื่อล็อกหัว (มือถือ: ล็อกอัตโนมัติเมื่อเปิดสวิตช์)
+    • ปุ่ม AI มุมขวาล่าง = แชทกับ AI  (พิมพ์ /key เปลี่ยน key, /clear ล้างแชท)
+    • AI ต้องใช้ Anthropic API key และ executor ที่มีฟังก์ชัน request
+]]
+
+local function MainUI()
+    ---------------------------------------------------------------------
+    -- ตั้งค่า
+    ---------------------------------------------------------------------
+    local API_KEY = ""   -- ใส่ key ตรงนี้ หรือเว้นว่างแล้ววางในแชทก็ได้ (อย่าแชร์สคริปต์ที่มี key)
+    local MODEL   = "claude-haiku-5-5"
+    local SYSTEM  = "คุณคือผู้ช่วยของทีม 4K ทู ตอบสั้น กระชับ ใช้ภาษาเดียวกับผู้ใช้"
+
+    local Players      = game:GetService("Players")
+    local RunService   = game:GetService("RunService")
+    local UIS          = game:GetService("UserInputService")
+    local Stats        = game:GetService("Stats")
+    local TweenService = game:GetService("TweenService")
+    local HttpService  = game:GetService("HttpService")
+    local lp           = Players.LocalPlayer
+    local NAME         = "4K_UI"
+
+    local C = {
+        bg     = Color3.fromRGB(14, 14, 16),
+        row    = Color3.fromRGB(34, 34, 40),
+        off    = Color3.fromRGB(60, 60, 66),
+        text   = Color3.fromRGB(245, 241, 232),
+        dim    = Color3.fromRGB(140, 140, 148),
+        accent = Color3.fromRGB(255, 90, 54),
+        good   = Color3.fromRGB(80, 220, 120),
+        warn   = Color3.fromRGB(255, 200, 60),
+        bad    = Color3.fromRGB(255, 70, 70),
+    }
+
+    local function new(class, props, parent)
+        local o = Instance.new(class)
+        for k, v in pairs(props) do o[k] = v end
+        o.Parent = parent
+        return o
+    end
+
+    local function tween(o, t, props, style, dir)
+        local tw = TweenService:Create(o, TweenInfo.new(t, style or Enum.EasingStyle.Quint,
+            dir or Enum.EasingDirection.Out), props)
+        tw:Play()
+        return tw
+    end
+
+    local function pop(s, from)
+        s.Scale = from or 1.18
+        tween(s, 0.35, { Scale = 1 }, Enum.EasingStyle.Back)
+    end
+
+    -- โลโก้ 4K ทู (ตัวเอียง + ขีดสะบัด + ลอยเบาๆ)
+    local function logo(parent, s)
+        local box = new("Frame", {
+            Size = UDim2.fromOffset(54 * s, 30 * s), BackgroundTransparency = 1,
+            AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
+        }, parent)
+        local mark = new("Frame", {
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Rotation = -6,
+        }, box)
+        new("TextLabel", {
+            Text = "4K", Font = Enum.Font.PermanentMarker, TextSize = math.floor(22 * s),
+            TextColor3 = C.text, BackgroundTransparency = 1,
+            Size = UDim2.fromOffset(28 * s, 26 * s),
+        }, mark)
+        new("TextLabel", {
+            Text = "ทู", Font = Enum.Font.GothamBlack, TextSize = math.floor(14 * s),
+            TextColor3 = C.accent, BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(28 * s, 4 * s), Size = UDim2.fromOffset(26 * s, 22 * s),
+        }, mark)
+        local sw1 = new("Frame", {
+            Position = UDim2.fromOffset(3 * s, 25 * s), Size = UDim2.fromOffset(46 * s, math.max(2, 3 * s)),
+            BackgroundColor3 = C.accent, BorderSizePixel = 0, Rotation = -2,
+        }, mark)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, sw1)
+        local sw2 = new("Frame", {
+            Position = UDim2.fromOffset(12 * s, 28 * s), Size = UDim2.fromOffset(30 * s, math.max(1, 1.5 * s)),
+            BackgroundColor3 = C.text, BorderSizePixel = 0, Rotation = -2,
+        }, mark)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, sw2)
+        TweenService:Create(mark, TweenInfo.new(2.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+            { Rotation = -3 }):Play()
+        return box
+    end
+
+    ---------------------------------------------------------------------
+    -- ESP + AIM (สถานะ)
+    ---------------------------------------------------------------------
+    local espOn, tracked, espConns = false, {}, {}
+    local opts = { name = true, dist = true, hp = true }
+    local aimOn, fovR, lastLock = false, 140, false
+
+    local function applyOne(t)
+        t.nameL.Visible  = opts.name
+        t.distL.Visible  = opts.dist
+        t.pill.Visible   = opts.name or opts.dist
+        t.hpBack.Visible = opts.hp
+    end
+
+    local function untrack(p)
+        local t = tracked[p]
+        if t then
+            pcall(function() t.hl:Destroy() end)
+            pcall(function() t.bb:Destroy() end)
+            tracked[p] = nil
+        end
+    end
+
+    local function track(p, char)
+        untrack(p)
+        local head = char:WaitForChild("Head", 5)
+        local hum  = char:WaitForChild("Humanoid", 5)
+        local root = char:WaitForChild("HumanoidRootPart", 5) or head
+        if not (head and hum and root) or not espOn then return end
+
+        local hl = new("Highlight", {
+            Name = "4K_ESP", FillColor = C.accent, OutlineColor = C.text,
+            FillTransparency = 1, OutlineTransparency = 1,
+            DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        }, char)
+        tween(hl, 0.5, { FillTransparency = 0.78, OutlineTransparency = 0.15 })
+
+        local bb = new("BillboardGui", {
+            Name = "4K_ESP_Tag", Adornee = head, AlwaysOnTop = true, MaxDistance = 1500,
+            Size = UDim2.fromOffset(140, 30), StudsOffset = Vector3.new(0, 2.4, 0),
+        }, char)
+
+        local pill = new("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 0),
+            Size = UDim2.fromOffset(0, 18), AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundColor3 = C.bg, BackgroundTransparency = 1, BorderSizePixel = 0,
+        }, bb)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, pill)
+        local pst = new("UIStroke", { Color = C.accent, Thickness = 1, Transparency = 1 }, pill)
+        new("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, pill)
+        new("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder,
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            HorizontalAlignment = Enum.HorizontalAlignment.Center, Padding = UDim.new(0, 5),
+        }, pill)
+
+        local n = p.DisplayName
+        if utf8.len(n) and utf8.len(n) > 14 then n = n:sub(1, utf8.offset(n, 15) - 1) .. "…" end
+        local nameL = new("TextLabel", {
+            Text = n, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.text,
+            TextTransparency = 1, BackgroundTransparency = 1, LayoutOrder = 1,
+            Size = UDim2.fromOffset(0, 18), AutomaticSize = Enum.AutomaticSize.X,
+        }, pill)
+        local distL = new("TextLabel", {
+            Text = "", Font = Enum.Font.GothamMedium, TextSize = 10, TextColor3 = C.accent,
+            TextTransparency = 1, BackgroundTransparency = 1, LayoutOrder = 2,
+            Size = UDim2.fromOffset(0, 18), AutomaticSize = Enum.AutomaticSize.X,
+        }, pill)
+
+        local hpBack = new("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 22),
+            Size = UDim2.fromOffset(46, 3), BackgroundColor3 = C.row,
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+        }, bb)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, hpBack)
+        local hpFill = new("Frame", {
+            Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = C.good,
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+        }, hpBack)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, hpFill)
+
+        tween(pill, 0.5, { BackgroundTransparency = 0.35 })
+        tween(pst, 0.5, { Transparency = 0.6 })
+        tween(nameL, 0.5, { TextTransparency = 0 })
+        tween(distL, 0.5, { TextTransparency = 0 })
+        tween(hpBack, 0.5, { BackgroundTransparency = 0.2 })
+        tween(hpFill, 0.5, { BackgroundTransparency = 0 })
+
+        local t = {
+            hl = hl, bb = bb, pill = pill, nameL = nameL, distL = distL,
+            hpBack = hpBack, hpFill = hpFill, hum = hum, root = root,
+        }
+        applyOne(t)
+        tracked[p] = t
+    end
+
+    local function setESP(on)
+        espOn = on
+        if on then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= lp then
+                    if p.Character then task.spawn(track, p, p.Character) end
+                    espConns[#espConns + 1] = p.CharacterAdded:Connect(function(c) track(p, c) end)
+                end
+            end
+            espConns[#espConns + 1] = Players.PlayerAdded:Connect(function(p)
+                espConns[#espConns + 1] = p.CharacterAdded:Connect(function(c) track(p, c) end)
+            end)
+            espConns[#espConns + 1] = Players.PlayerRemoving:Connect(untrack)
+        else
+            for _, c in ipairs(espConns) do c:Disconnect() end
+            espConns = {}
+            for p in pairs(tracked) do untrack(p) end
+        end
+    end
+
+    ---------------------------------------------------------------------
+    -- UI พื้นฐาน
+    ---------------------------------------------------------------------
+    local function clean(root)
+        local o = root and root:FindFirstChild(NAME)
+        if o then o:Destroy() end
+    end
+    pcall(clean, lp:FindFirstChild("PlayerGui"))
+    pcall(clean, game:GetService("CoreGui"))
+    pcall(clean, gethui and gethui())
+
+    local gui = new("ScreenGui", {
+        Name = NAME, ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 999,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    })
+    local ok = pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not ok or not gui.Parent then gui.Parent = lp:WaitForChild("PlayerGui") end
+
+    -- แผงแคปซูล (top = บน / ล่าง) พร้อมลูกศรซ่อน/แสดง
+    local function makeBar(top, h)
+        local gap = 12
+        local bar = new("Frame", {
+            AnchorPoint = Vector2.new(0.5, top and 0 or 1),
+            Position = top and UDim2.new(0.5, 0, 0, -(h + 30)) or UDim2.new(0.5, 0, 1, h + 30),
+            Size = UDim2.fromOffset(0, h), AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundColor3 = C.bg, BackgroundTransparency = 0.06, BorderSizePixel = 0,
+        }, gui)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
+        local stroke = new("UIStroke", { Thickness = 1.8, Color = Color3.new(1, 1, 1) }, bar)
+        local grad = new("UIGradient", {
+            Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, C.accent),
+                ColorSequenceKeypoint.new(0.5, C.text),
+                ColorSequenceKeypoint.new(1, C.accent),
+            }),
+        }, stroke)
+        new("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }, bar)
+        new("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center,
+            SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
+        }, bar)
+
+        local shownPos  = top and UDim2.new(0.5, 0, 0, gap) or UDim2.new(0.5, 0, 1, -gap)
+        local hiddenPos = top and UDim2.new(0.5, 0, 0, -(h + 24)) or UDim2.new(0.5, 0, 1, h + 24)
+        tween(bar, 0.8, { Position = shownPos }, Enum.EasingStyle.Back)
+
+        local hy = gap + h + 4
+        local handleShown  = top and UDim2.new(0.5, 0, 0, hy) or UDim2.new(0.5, 0, 1, -hy)
+        local handleHidden = top and UDim2.new(0.5, 0, 0, 4) or UDim2.new(0.5, 0, 1, -4)
+        local handle = new("TextButton", {
+            Text = "^", Font = Enum.Font.GothamBlack, TextSize = 12, TextColor3 = C.accent,
+            BackgroundColor3 = C.bg, AutoButtonColor = false,
+            AnchorPoint = Vector2.new(0.5, top and 0 or 1), Position = handleShown,
+            Rotation = top and 0 or 180, Size = UDim2.fromOffset(44, 16),
+        }, gui)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, handle)
+        new("UIStroke", { Color = C.accent, Thickness = 1.2, Transparency = 0.4 }, handle)
+        local hScale = new("UIScale", { Scale = 0 }, handle)
+        task.delay(0.6, function() tween(hScale, 0.5, { Scale = 1 }, Enum.EasingStyle.Back) end)
+
+        local B = { bar = bar, stroke = stroke, grad = grad, shown = true }
+        local order = 0
+
+        B.section = function(w)
+            order += 1
+            return new("Frame", {
+                Size = UDim2.new(0, w, 1, 0), BackgroundTransparency = 1, LayoutOrder = order,
+            }, bar)
+        end
+        B.divider = function()
+            order += 1
+            new("Frame", {
+                Size = UDim2.fromOffset(1, 18), BackgroundColor3 = C.row,
+                BorderSizePixel = 0, LayoutOrder = order,
+            }, bar)
+        end
+        B.setShown = function(state)
+            B.shown = state
+            tween(bar, state and 0.6 or 0.4, { Position = state and shownPos or hiddenPos },
+                state and Enum.EasingStyle.Back or Enum.EasingStyle.Quint,
+                state and Enum.EasingDirection.Out or Enum.EasingDirection.In)
+            tween(handle, 0.5, {
+                Position = state and handleShown or handleHidden,
+                Rotation = (top == state) and 0 or 180,
+            }, Enum.EasingStyle.Back)
+        end
+        handle.Activated:Connect(function()
+            pop(hScale, 0.8)
+            B.setShown(not B.shown)
+        end)
+        return B
+    end
+
+    ---------------------------------------------------------------------
+    -- แผงบน: โลโก้ + FPS + PING (เล็ก)
+    ---------------------------------------------------------------------
+    local top = makeBar(true, 32)
+
+    logo(top.section(50), 0.85)
+    top.divider()
+
+    local fpsSec = top.section(64)
+    local dot = new("Frame", {
+        Size = UDim2.fromOffset(7, 7), AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = C.good, BorderSizePixel = 0,
+    }, fpsSec)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, dot)
+    TweenService:Create(dot, TweenInfo.new(0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+        { BackgroundTransparency = 0.65 }):Play()
+    local fpsNum = new("TextLabel", {
+        Text = "--", Font = Enum.Font.GothamBlack, TextSize = 15, TextColor3 = C.good,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(13, 0), Size = UDim2.new(0, 28, 1, 0),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, fpsSec)
+    local fpsScale = new("UIScale", {}, fpsNum)
+    new("TextLabel", {
+        Text = "FPS", Font = Enum.Font.GothamBold, TextSize = 9, TextColor3 = C.dim,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(42, 0), Size = UDim2.new(0, 22, 1, 0),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, fpsSec)
+
+    top.divider()
+
+    local pingSec = top.section(70)
+    local sigBox = new("Frame", {
+        Size = UDim2.fromOffset(13, 10), AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 0, 0.5, 0), BackgroundTransparency = 1,
+    }, pingSec)
+    local sig = {}
+    for i = 1, 3 do
+        sig[i] = new("Frame", {
+            Size = UDim2.fromOffset(3, 0), AnchorPoint = Vector2.new(0, 1),
+            Position = UDim2.new(0, (i - 1) * 5, 1, 0), BackgroundColor3 = C.off, BorderSizePixel = 0,
+        }, sigBox)
+        new("UICorner", { CornerRadius = UDim.new(0, 1) }, sig[i])
+        task.delay(0.5 + 0.08 * i, function()
+            tween(sig[i], 0.4, { Size = UDim2.fromOffset(3, 3 + 2 * i) }, Enum.EasingStyle.Back)
+        end)
+    end
+    local pingNum = new("TextLabel", {
+        Text = "--", Font = Enum.Font.GothamBlack, TextSize = 15, TextColor3 = C.good,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(19, 0), Size = UDim2.new(0, 28, 1, 0),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, pingSec)
+    local pingScale = new("UIScale", {}, pingNum)
+    new("TextLabel", {
+        Text = "ms", Font = Enum.Font.GothamBold, TextSize = 9, TextColor3 = C.dim,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(48, 0), Size = UDim2.new(0, 18, 1, 0),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, pingSec)
+
+    ---------------------------------------------------------------------
+    -- วงกลม FOV ของ AIM
+    ---------------------------------------------------------------------
+    local fov = new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(fovR * 2, fovR * 2),
+        Position = UDim2.fromOffset(0, 0), BackgroundTransparency = 1, Visible = false,
+    }, gui)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, fov)
+    local fovStroke = new("UIStroke", { Color = C.accent, Thickness = 1.5, Transparency = 1 }, fov)
+    local fovScale = new("UIScale", { Scale = 0.6 }, fov)
+
+    local function setAim(on)
+        aimOn = on
+        if on then
+            fov.Visible = true
+            fovScale.Scale = 0.6
+            tween(fovScale, 0.45, { Scale = 1 }, Enum.EasingStyle.Back)
+            tween(fovStroke, 0.3, { Transparency = 0.35 })
+        else
+            tween(fovScale, 0.25, { Scale = 0.6 }, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+            local tw = tween(fovStroke, 0.25, { Transparency = 1 })
+            tw.Completed:Connect(function()
+                if not aimOn then fov.Visible = false end
+            end)
+        end
+    end
+
+    ---------------------------------------------------------------------
+    -- แผงล่าง: ESP / AIM / FOV / ชิป
+    ---------------------------------------------------------------------
+    local bot = makeBar(false, 38)
+
+    local function addSwitch(B, label, cb)
+        local sec = B.section(78)
+        local lbl = new("TextLabel", {
+            Text = label, Font = Enum.Font.GothamBlack, TextSize = 12, TextColor3 = C.dim,
+            BackgroundTransparency = 1, Size = UDim2.new(0, 30, 1, 0), TextXAlignment = Enum.TextXAlignment.Left,
+        }, sec)
+        local sw = new("Frame", {
+            BackgroundColor3 = C.off, BorderSizePixel = 0, AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(36, 18),
+        }, sec)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, sw)
+        local sc = new("UIScale", {}, sw)
+        local knob = new("Frame", {
+            BackgroundColor3 = C.text, BorderSizePixel = 0, AnchorPoint = Vector2.new(0, 0.5),
+            Position = UDim2.new(0, 2, 0.5, 0), Size = UDim2.fromOffset(14, 14),
+        }, sw)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+        local btn = new("TextButton", {
+            Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), ZIndex = 5,
+        }, sec)
+        local on = false
+        btn.Activated:Connect(function()
+            on = not on
+            cb(on)
+            tween(sw, 0.2, { BackgroundColor3 = on and C.accent or C.off })
+            tween(knob, 0.3, {
+                Position = on and UDim2.new(1, -16, 0.5, 0) or UDim2.new(0, 2, 0.5, 0),
+            }, Enum.EasingStyle.Back)
+            tween(lbl, 0.25, { TextColor3 = on and C.accent or C.dim })
+            TweenService:Create(B.stroke, TweenInfo.new(0.18, Enum.EasingStyle.Quint,
+                Enum.EasingDirection.Out, 0, true), { Thickness = 4 }):Play()
+            pop(sc, 0.85)
+        end)
+    end
+
+    addSwitch(bot, "ESP", setESP)
+    addSwitch(bot, "AIM", setAim)
+
+    -- ปุ่มปรับขนาด FOV (วนค่า 80 / 140 / 220)
+    local fovSteps, fovIdx = { 80, 140, 220 }, 2
+    local fovSec = bot.section(58)
+    local fovBtn = new("TextButton", {
+        Text = "FOV " .. fovR, Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = C.text,
+        BackgroundColor3 = C.row, AutoButtonColor = false,
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, 0, 0, 22),
+        }, s)
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }, b)
+        local sc = new("UIScale", {}, b)
+        b.Activated:Connect(function()
+            opts[key] = not opts[key]
+            local on = opts[key]
+            tween(b, 0.2, { BackgroundColor3 = on and C.accent or C.row, TextColor3 = on and C.bg or C.dim })
+            pop(sc, 0.85)
+            for _, t in pairs(tracked) do applyOne(t) end
+        end)
+    end
+    chip("NAME", 46, "name")
+    chip("DIST", 42, "dist")
+    chip("HP", 32, "hp")
+
+    ---------------------------------------------------------------------
+    -- AI CHAT
+    ---------------------------------------------------------------------
+    local httpReq = request or http_request or (syn and syn.request) or (http and http.request)
+    local history, busy, awaitKey, msgN = {}, false, false, 0
+
+    local aiBtn = new("TextButton", {
+        Text = "AI", Font = Enum.Font.GothamBlack, TextSize = 15, TextColor3 = C.accent,
+        BackgroundColor3 = C.bg, AutoButtonColor = false, AnchorPoint = Vector2.new(1, 1),
+        Position = UDim2.new(1, -16, 1, -16), Size = UDim2.fromOffset(44, 44),
+    }, gui)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, aiBtn)
+    local aiStroke = new("UIStroke", { Thickness = 2, Color = Color3.new(1, 1, 1) }, aiBtn)
+    local aiGrad = new("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, C.accent),
+            ColorSequenceKeypoint.new(0.5, C.text),
+            ColorSequenceKeypoint.new(1, C.accent),
+        }),
+    }, aiStroke)
+    local aiScale = new("UIScale", { Scale = 0 }, aiBtn)
+    task.delay(0.7, function() tween(aiScale, 0.6, { Scale = 1 }, Enum.EasingStyle.Back) end)
+
+    local chat = new("CanvasGroup", {
+        Name = "Chat", AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -16, 1, -52),
+        Size = UDim2.fromOffset(300, 360), BackgroundColor3 = C.bg, BackgroundTransparency = 0.04,
+        BorderSizePixel = 0, GroupTransparency = 1, Visible = false,
+    }, gui)
+    new("UICorner", { CornerRadius = UDim.new(0, 16) }, chat)
+    new("UIStroke", { Color = C.accent, Thickness = 1.5, Transparency = 0.4 }, chat)
+    local cScale = new("UIScale", { Scale = 0.85 }, chat)
+
+    local cHead = new("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1 }, chat)
+    local lg = logo(cHead, 0.8)
+    lg.Position = UDim2.new(0, 12, 0.5, 0)
+    new("TextLabel", {
+        Text = "AI CHAT", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.dim,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(66, 0), Size = UDim2.new(0, 80, 1, 0),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, cHead)
+    local closeBtn = new("TextButton", {
+        Text = "×", Font = Enum.Font.GothamBold, TextSize = 18, TextColor3 = C.text,
+        BackgroundColor3 = C.row, AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.fromOffset(24, 24),
+    }, cHead)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, closeBtn)
+    new("Frame", {
+        Position = UDim2.fromOffset(0, 40), Size = UDim2.new(1, -16, 1, -102),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+        ScrollBarImageColor3 = C.accent, CanvasSize = UDim2.new(0, 0, 0, 0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    }, chat)
+    new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, msgs)
+    new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), PaddingRight = UDim.new(0, 4) }, msgs)
+
+    local inputRow = new("Frame", {
+        AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 8, 1, -8),
+        Size = UDim2.new(1, -16, 0, 38), BackgroundColor3 = C.row, BorderSizePixel = 0,
+    }, chat)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, inputRow)
+    local input = new("TextBox", {
+        Text = "", PlaceholderText = "พิมพ์ข้อความ...", PlaceholderColor3 = C.dim,
+        Font = Enum.Font.Gotham, TextSize = 13, TextColor3 = C.text, ClearTextOnFocus = false,
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(14, 0), Size = UDim2.new(1, -58, 1, 0),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, inputRow)
+    local sendBtn = new("TextButton", {
+        Text = ">", Font = Enum.Font.GothamBlack, TextSize = 16, TextColor3 = C.bg,
+        BackgroundColor3 = C.accent, AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -4, 0.5, 0), Size = UDim2.fromOffset(30, 30),
+    }, inputRow)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, sendBtn)
+    local sendScale = new("UIScale", {}, sendBtn)
+
+    local function toBottom()
+        task.delay(0.06, function() msgs.CanvasPosition = Vector2.new(0, 1e6) end)
+    end
+
+    local function addMsg(role, text)
+        local mine = role == "user"
+        msgN += 1
+        local row = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1, LayoutOrder = msgN,
+        }, msgs)
+        new("UIListLayout", {
+            HorizontalAlignment = mine and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left,
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, row)local bub = new("Frame", {
+            Size = UDim2.fromOffset(0, 0), AutomaticSize = Enum.AutomaticSize.XY,
+            BackgroundColor3 = mine and C.accent or C.row, BackgroundTransparency = 1, BorderSizePixel = 0,
+        }, row)
+        new("UICorner", { CornerRadius = UDim.new(0, 12) }, bub)
+        new("UIPadding", {
+            PaddingTop = UDim.new(0, 7), PaddingBottom = UDim.new(0, 7),
+            PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
+        }, bub)
+        local lbl = new("TextLabel", {
+            Text = text, Font = Enum.Font.Gotham, TextSize = 13, TextColor3 = mine and C.bg or C.text,
+            TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextTransparency = 1,
+            BackgroundTransparency = 1, Size = UDim2.fromOffset(0, 0), AutomaticSize = Enum.AutomaticSize.XY,
+        }, bub)
+        new("UISizeConstraint", { MaxSize = Vector2.new(190, math.huge) }, lbl)
+        local sc = new("UIScale", { Scale = 0.85 }, bub)
+        tween(bub, 0.3, { BackgroundTransparency = mine and 0 or 0.1 })
+        tween(lbl, 0.3, { TextTransparency = 0 })
+        tween(sc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back)
+        toBottom()
+        return lbl
+    end
+
+    local function askKey(msg)
+        awaitKey = true
+        input.PlaceholderText = "วาง API key แล้วกด Enter"
+        addMsg("ai", msg)
+    end
+
+    local function send()
+        local text = input.Text
+        text = text:gsub("^%s+", "")
+        text = text:gsub("%s+$", "")
+        if text == "" or busy then return end
+        input.Text = ""
+        pop(sendScale, 0.8)
+
+        if awaitKey then
+            API_KEY, awaitKey = text, false
+            input.PlaceholderText = "พิมพ์ข้อความ..."
+            addMsg("ai", "ตั้งค่า key แล้ว คุยได้เลยครับ")
+            return
+        end
+        if text == "/key" then askKey("วาง Anthropic API key ในช่องด้านล่างได้เลย") return end
+        if text == "/clear" then
+            history = {}
+            for _, c in ipairs(msgs:GetChildren()) do
+                if c:IsA("Frame") then c:Destroy() end
+            end
+            return
+        end
+
+        addMsg("user", text)
+        if API_KEY == "" then askKey("ยังไม่มี API key วางในช่องด้านล่างแล้วกด Enter ครับ") return end
+        if not httpReq then addMsg("ai", "ต้องรันผ่าน executor ที่มีฟังก์ชัน request ครับ") return end
+
+        busy = true
+        local lbl = addMsg("ai", ".")
+        local typing = true
+        task.spawn(function()
+            local n = 0
+            while typing do
+                n = n % 3 + 1
+                lbl.Text = string.rep(".", n)
+                task.wait(0.3)
+            end
+        end)
+
+        history[#history + 1] = { role = "user", content = text }
+        while #history > 12 do
+            table.remove(history, 1)
+            table.remove(history, 1)
+        end
+
+        task.spawn(function()
+            local s, res = pcall(httpReq, {
+                Url = "https://api.anthropic.com/v1/messages",
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json",
+                    ["x-api-key"] = API_KEY,
+                    ["anthropic-version"] = "2023-06-01",
+                },
+                Body = HttpService:JSONEncode({
+                    model = MODEL, max_tokens = 500, system = SYSTEM, messages = history,
+                }),
+            })
+            local reply, err
+            if s and res then
+                local okj, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+                if okj and res.StatusCode == 200 and data.content and data.content[1] then
+                    reply = data.content[1].text
+                else
+                    err = (okj and data.error and data.error.message) or ("HTTP " .. tostring(res.StatusCode))
+                end
+            else
+                err = tostring(res)
+            end
+
+            typing = false
+            if reply then
+                history[#history + 1] = { role = "assistant", content = reply }
+                lbl.Text = reply
+            else
+                table.remove(history)
+                lbl.Text = "เกิดข้อผิดพลาด: " .. err
+                lbl.TextColor3 = C.bad
+            end
+            busy = false
+            toBottom()
+        end)
+    end
+
+    input.FocusLost:Connect(function(enter)
+        if enter then
+            send()
+            task.defer(function() input:CaptureFocus() end)
+        end
+    end)
+    sendBtn.Activated:Connect(send)
+
+    local chatOpen, greeted = false, false
+    local function setChat(state)
+        chatOpen = state
+        if state then
+            chat.Visible = true
+            chat.Position = UDim2.new(1, -16, 1, -52)
+            cScale.Scale = 0.85
+            tween(chat, 0.45, { Position = UDim2.new(1, -16, 1, -72) }, Enum.EasingStyle.Back)
+            tween(chat, 0.3, { GroupTransparency = 0 })
+            tween(cScale, 0.45, { Scale = 1 }, Enum.EasingStyle.Back)
+            tween(aiBtn, 0.3, { BackgroundColor3 = C.accent, TextColor3 = C.bg })
+            if not greeted then
+                greeted = true
+                addMsg("ai", "สวัสดี! ผมคือ AI ของ 4K ทู ถามได้เลย")
+                if API_KEY == "" then askKey("ก่อนเริ่ม วาง Anthropic API key ในช่องด้านล่างแล้วกด Enter ครับ") end
+            end
+        else
+            tween(cScale, 0.25, { Scale = 0.9 }, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+            local tw = tween(chat, 0.25, { GroupTransparency = 1 })
+            tw.Completed:Connect(function()  if not chatOpen then chat.Visible = false end
+            end)
+            tween(aiBtn, 0.3, { BackgroundColor3 = C.bg, TextColor3 = C.accent })
+        end
+    end
+    aiBtn.MouseEnter:Connect(function() tween(aiScale, 0.2, { Scale = 1.1 }, Enum.EasingStyle.Back) end)
+    aiBtn.MouseLeave:Connect(function() tween(aiScale, 0.2, { Scale = 1 }) end)
+    aiBtn.Activated:Connect(function()
+        pop(aiScale, 0.8)
+        setChat(not chatOpen)
+    end)
+    closeBtn.Activated:Connect(function() setChat(false) end)
+
+    ---------------------------------------------------------------------
+    -- ลูปหลัก
+    ---------------------------------------------------------------------
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local conns, fps, acc, frames, espAcc = {}, 60, 0, 0, 0
+    conns[#conns + 1] = RunService.RenderStepped:Connect(function(dt)
+        top.grad.Rotation = (top.grad.Rotation + dt * 120) % 360
+        bot.grad.Rotation = (bot.grad.Rotation - dt * 120) % 360
+        aiGrad.Rotation = (aiGrad.Rotation + dt * 120) % 360
+
+        -- AIM
+        if aimOn then
+            local m = UIS:GetMouseLocation()
+            fov.Position = UDim2.fromOffset(m.X, m.Y)
+            local cam, myChar = workspace.CurrentCamera, lp.Character
+            local best, bestD
+            if cam and myChar then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= lp and not (p.Team and p.Team == lp.Team) then
+                        local ch = p.Character
+                        local head = ch and ch:FindFirstChild("Head")
+                        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                        if head and hum and hum.Health > 0 then
+                            local sp, vis = cam:WorldToViewportPoint(head.Position)
+                            if vis then
+                                local d = (Vector2.new(sp.X, sp.Y) - m).Magnitude
+                                if d < fovR and (not bestD or d < bestD) then
+                                    rayParams.FilterDescendantsInstances = { myChar, ch }
+                                    local origin = cam.CFrame.Position
+                                    if not workspace:Raycast(origin, head.Position - origin, rayParams) then
+                                        best, bestD = head, d
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            local locked = best ~= nil
+            if locked ~= lastLock then
+                lastLock = locked
+                tween(fovStroke, 0.15, { Color = locked and C.good or C.accent })
+            end
+
+            local holding = UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+                or (UIS.TouchEnabled and not UIS.KeyboardEnabled)
+            if holding and best then
+                local alpha = 1 - math.exp(-14 * dt)
+                cam.CFrame = cam.CFrame:Lerp(CFrame.new(cam.CFrame.Position, best.Position), alpha)
+            end
+        end
+
+        -- ESP: ระยะ + เลือด
+        if espOnthen
+            espAcc += dt
+            if espAcc >= 0.1 then
+                espAcc = 0
+                local me = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                if me then
+                    for _, t in pairs(tracked) do
+                        if t.root.Parent and t.hum.Parent then
+                            local ratio = math.clamp(t.hum.Health / math.max(t.hum.MaxHealth, 1), 0, 1)
+                            t.distL.Text = string.format("%dm", math.floor((t.root.Position - me.Position).Magnitude))
+                            t.hpFill.Size = UDim2.new(ratio, 0, 1, 0)
+                            t.hpFill.BackgroundColor3 = ratio > 0.6 and C.good or ratio > 0.3 and C.warn or C.bad
+                        end
+                    end
+                end
+            end
+        end
+
+        -- FPS / PING ทุก 0.5 วิ
+        acc += dt
+        frames += 1
+        if acc < 0.5 then return end
+        fps, acc, frames = math.floor(frames / acc + 0.5), 0, 0
+
+        local fcol = fps >= 55 and C.good or fps >= 30 and C.warn or C.bad
+        fpsNum.Text = tostring(fps)
+        tween(fpsNum, 0.3, { TextColor3 = fcol })
+        tween(dot, 0.3, { BackgroundColor3 = fcol })
+        pop(fpsScale, 1.12)
+
+        local s, v = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+        local ping = s and math.floor(v + 0.5) or nil
+        local pcol, lit = C.dim, 0
+        if ping then
+            pcol = ping < 80 and C.good or ping < 160 and C.warn or C.bad
+            lit = ping < 80 and 3 or ping < 160 and 2 or 1
+        end
+        pingNum.Text = ping and tostring(ping) or "--"
+        tween(pingNum, 0.3, { TextColor3 = pcol })
+        for i, b in ipairs(sig) do
+            tween(b, 0.3, { BackgroundColor3 = i <= lit and pcol or C.off })
+        end
+        pop(pingScale, 1.12)
+    end)
+
+    conns[#conns + 1] = UIS.InputBegan:Connect(function(i, processed)
+        if processed then return end
+        if i.KeyCode == Enum.KeyCode.RightControl then top.setShown(not top.shown) end
+        if i.KeyCode == Enum.KeyCode.RightShift then bot.setShown(not bot.shown) end
+    end)
+
+    gui.Destroying:Connect(function()
+        for _, c in ipairs(conns) do c:Disconnect() end
+        aimOn = false
+        setESP(false)
+    end)
+end
+
+MainUI()
